@@ -35,7 +35,9 @@ SKIP_RETURN = 'return{action:"skip"'
 def is_claude_binary(path: Path) -> bool:
     """Return True for plausible Claude Code SEA binaries, not wrappers."""
     try:
-        return path.is_file() and path.suffix.lower() in {"", ".exe"} and path.stat().st_size >= MIN_BINARY_SIZE
+        suffix = path.suffix.lower()
+        ok_ext = suffix in {"", ".exe"} or suffix.lstrip(".").isdigit()
+        return path.is_file() and ok_ext and path.stat().st_size >= MIN_BINARY_SIZE
     except OSError:
         return False
 
