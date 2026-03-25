@@ -160,6 +160,10 @@ noAuth:  SL()?.accessToken   // undefined（假值），会被视为 not-noAuth
 - **原子写入**：使用临时文件和 `os.replace()`，避免破坏正在运行的二进制
 - **可恢复**：`python patch.py revert` 可以随时恢复所有二进制
 
+## 友情链接
+
+- [linux.do](https://linux.do/)
+
 ## 许可证
 
 MIT
