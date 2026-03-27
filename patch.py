@@ -30,6 +30,9 @@ CAPABILITY_MARKER = "claude/channel"
 FEATURE_MESSAGE = "channels feature is not currently available"
 REGISTER_RETURN = 'return{action:"register"}'
 SKIP_RETURN = 'return{action:"skip"'
+BUN_TAG_PREFIX = b"// @bun "
+BUN_BYTECODE_MARKER = b"@bytecode"
+BUN_SOURCE_FALLBACK_MARKER = b"@source__"
 
 
 def is_claude_binary(path: Path) -> bool:
@@ -160,12 +163,28 @@ def find_backwards(data: bytes, anchor_offset: int, needle: bytes, max_window: i
     return (start + pos) if pos != -1 else None
 
 
-def patch_byte(data: bytearray, offset: int, expected: int, replacement: int, desc: str):
+def patch_byte(data: bytearray, offset: int, expected: int, replacement: int, desc: str) -> int:
     actual = data[offset]
+    if actual == replacement:
+        print(f"  OK {desc} @{offset} (already)")
+        return 0
     if actual != expected:
         sys.exit(f"FAIL [{desc}] @{offset}: expected 0x{expected:02x}, got 0x{actual:02x}")
     data[offset] = replacement
     print(f"  OK {desc} @{offset}")
+    return 1
+
+
+def patch_bytes(data: bytearray, offset: int, expected: bytes, replacement: bytes, desc: str) -> int:
+    actual = bytes(data[offset : offset + len(expected)])
+    if actual == replacement:
+        print(f"  OK {desc} @{offset} (already)")
+        return 0
+    if actual != expected:
+        sys.exit(f"FAIL [{desc}] @{offset}: expected {expected!r}, got {actual!r}")
+    data[offset : offset + len(expected)] = replacement
+    print(f"  OK {desc} @{offset}")
+    return 1
 
 
 def locate_feature_flag_sites(data: bytes) -> list[int]:
@@ -218,6 +237,34 @@ def locate_policyblocked_ui_sites(data: bytes) -> list[int]:
         if tail in (b"f&&", b"0&&"):
             sites.append(site)
     return sites
+
+
+def locate_bun_bytecode_sites(data: bytes) -> list[int]:
+    sites = []
+    for off in find_all(data, BUN_TAG_PREFIX):
+        site = off + len(BUN_TAG_PREFIX)
+        tag = data[site : site + len(BUN_BYTECODE_MARKER)]
+        if tag in (BUN_BYTECODE_MARKER, BUN_SOURCE_FALLBACK_MARKER):
+            sites.append(site)
+    return sites
+
+
+def classify_bun_source_fallback(data: bytes) -> tuple[str, list[str], bool]:
+    sites = locate_bun_bytecode_sites(data)
+    if not sites:
+        return "absent", [], False
+
+    values = [data[site : site + len(BUN_BYTECODE_MARKER)] for site in sites]
+    details = []
+    if all(value == BUN_SOURCE_FALLBACK_MARKER for value in values):
+        details.append(f"bun bytecode fallback: patched ({len(sites)} site(s))")
+        return "patched", details, True
+    if all(value == BUN_BYTECODE_MARKER for value in values):
+        details.append(f"bun bytecode fallback: clean ({len(sites)} site(s))")
+        return "clean", details, True
+
+    details.append(f"bun bytecode fallback: mixed state ({len(sites)} site(s))")
+    return "mixed", details, True
 
 
 def classify_legacy_patch(data: bytes) -> tuple[str, list[str]]:
@@ -285,7 +332,17 @@ def classify_legacy_patch(data: bytes) -> tuple[str, list[str]]:
         else:
             details.append(f"{desc}: mixed state ({len(sites)} site(s))")
 
+    bun_state, bun_details, bun_required = classify_bun_source_fallback(data)
+    if bun_required:
+        details.extend(bun_details)
+        if bun_state == "patched":
+            patched += 1
+        elif bun_state == "clean":
+            clean += 1
+
     total = len(checks)
+    if bun_required:
+        total += 1
     if patched == total:
         return "patched", details
     if clean == total:
@@ -323,6 +380,15 @@ def classify_decision_support_patches(data: bytes) -> tuple[str, list[str]]:
         else:
             details.append(f"{desc}: mixed state ({len(sites)} site(s))")
 
+    bun_state, bun_details, bun_required = classify_bun_source_fallback(data)
+    if bun_required:
+        required_total += 1
+        details.extend(bun_details)
+        if bun_state == "patched":
+            required_patched += 1
+        elif bun_state == "clean":
+            required_clean += 1
+
     if required_patched == required_total:
         return "patched", details
     if required_clean == required_total:
@@ -330,31 +396,39 @@ def classify_decision_support_patches(data: bytes) -> tuple[str, list[str]]:
     return "mixed", details
 
 
+def apply_bun_source_fallback_patches(data: bytearray) -> int:
+    desc = "bun bytecode fallback"
+    offsets = locate_bun_bytecode_sites(data)
+    edits = 0
+    for site in offsets:
+        edits += patch_bytes(data, site, BUN_BYTECODE_MARKER, BUN_SOURCE_FALLBACK_MARKER, desc)
+    return edits
+
+
 def apply_decision_support_patches(data: bytearray) -> int:
     edits = 0
+
+    edits += apply_bun_source_fallback_patches(data)
 
     desc = "tengu_harbor default"
     offsets = locate_feature_flag_sites(data)
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x31, 0x30, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x31, 0x30, desc)
 
     desc = "channels notice noAuth UI"
     offsets = locate_noauth_sites(data)
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x21, 0x20, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x21, 0x20, desc)
 
     desc = "channels notice policyBlocked UI"
     offsets = locate_policyblocked_ui_sites(data)
     if len(offsets) >= 2:
         for site in offsets:
-            patch_byte(data, site, 0x66, 0x30, desc)
-            edits += 1
+            edits += patch_byte(data, site, 0x66, 0x30, desc)
     else:
         print(f"  SKIP {desc} (optional, found {len(offsets)} site(s))")
 
@@ -364,13 +438,14 @@ def apply_decision_support_patches(data: bytearray) -> int:
 def apply_legacy_patches(data: bytearray) -> int:
     edits = 0
 
+    edits += apply_bun_source_fallback_patches(data)
+
     desc = "tengu_harbor default"
     offsets = locate_feature_flag_sites(data)
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x31, 0x30, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x31, 0x30, desc)
 
     desc = "B6f auth bypass"
     offsets = locate_backwards_sites(
@@ -384,8 +459,7 @@ def apply_legacy_patches(data: bytearray) -> int:
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x21, 0x20, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x21, 0x20, desc)
 
     desc = "allowlist bypass (plugin)"
     offsets = locate_backwards_sites(
@@ -399,8 +473,7 @@ def apply_legacy_patches(data: bytearray) -> int:
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x21, 0x20, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x21, 0x20, desc)
 
     desc = "allowlist bypass (server)"
     offsets = locate_backwards_sites(
@@ -414,16 +487,14 @@ def apply_legacy_patches(data: bytearray) -> int:
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x21, 0x20, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x21, 0x20, desc)
 
     desc = "bl6 noAuth bypass"
     offsets = locate_noauth_sites(data)
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        patch_byte(data, site, 0x21, 0x20, desc)
-        edits += 1
+        edits += patch_byte(data, site, 0x21, 0x20, desc)
 
     return edits
 
@@ -636,6 +707,8 @@ def looks_like_decision_patched(data: bytes) -> bool:
 def apply_decision_patches(data: bytearray) -> int:
     patches = locate_decision_patches(bytes(data))
     if len(patches) < 2:
+        if len(locate_patched_decision_bodies(data)) >= 2:
+            return apply_decision_support_patches(data)
         return 0
 
     text = data.decode("latin-1")
@@ -676,6 +749,7 @@ def classify_binary(data: bytes) -> tuple[str, str | None, list[str]]:
 
     if looks_like_decision_patched(data):
         details.append("decision patch heuristic matched")
+        details.extend(support_details)
         return "patched", "decision", details
 
     if patched_decision_bodies:
@@ -687,8 +761,10 @@ def classify_binary(data: bytes) -> tuple[str, str | None, list[str]]:
     if decision_candidates:
         details.append(f"decision-function candidates: {len(decision_candidates)}")
         details.extend(support_details)
-        if patched_decision_bodies:
-            return ("patched", "decision", details) if support_state == "patched" else ("mixed", None, details)
+        if support_state == "patched":
+            return "patched", "decision", details
+        if support_state == "clean":
+            return "clean", "decision", details
 
     legacy_state, legacy_details = classify_legacy_patch(data)
     details.extend(legacy_details)
@@ -706,11 +782,11 @@ def choose_patch_strategy(data: bytes, requested: str) -> str:
     if requested == "legacy":
         return "legacy"
     if requested == "decision":
-        if len(locate_decision_patches(data)) < 2:
+        if len(locate_decision_patches(data)) < 2 and len(locate_patched_decision_bodies(data)) < 2:
             sys.exit("FAIL [decision]: could not safely locate both decision-function copies")
         return "decision"
 
-    if len(locate_decision_patches(data)) >= 2:
+    if len(locate_decision_patches(data)) >= 2 or len(locate_patched_decision_bodies(data)) >= 2:
         return "decision"
     return "legacy"
 
@@ -719,15 +795,27 @@ def resolve_binary(args_binary: str | None) -> list[Path]:
     return [Path(args_binary)] if args_binary else detect_binaries()
 
 
+def backup_path(binary: Path) -> Path:
+    if binary.suffix.lower() in {"", ".exe"}:
+        return binary.with_suffix(".bak")
+    return binary.with_name(binary.name + ".bak")
+
+
+def patched_path(binary: Path) -> Path:
+    if binary.suffix.lower() in {"", ".exe"}:
+        return binary.with_suffix(".patched")
+    return binary.with_name(binary.name + ".patched")
+
+
 def read_source_bytes(binary: Path) -> tuple[bytes, Path | None]:
-    backup = binary.with_suffix(".bak")
+    backup = backup_path(binary)
     if backup.exists():
         return backup.read_bytes(), backup
     return binary.read_bytes(), None
 
 
 def revert(binary: Path):
-    backup = binary.with_suffix(".bak")
+    backup = backup_path(binary)
     if not backup.exists():
         sys.exit("No backup found - nothing to revert.")
     shutil.copy2(backup, binary)
@@ -735,7 +823,7 @@ def revert(binary: Path):
 
 
 def write_binary(binary: Path, data: bytes):
-    tmp = binary.with_suffix(".patched")
+    tmp = patched_path(binary)
     tmp.write_bytes(data)
     os.chmod(str(tmp), os.stat(str(binary)).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     try:
@@ -752,7 +840,7 @@ def check(binary: Path, requested_strategy: str):
         sys.exit(f"Binary not found: {binary}")
 
     current = binary.read_bytes()
-    backup = binary.with_suffix(".bak")
+    backup = backup_path(binary)
     status, active_strategy, details = classify_binary(current)
 
     print(f"Status    : {status}")
@@ -776,19 +864,26 @@ def patch(binary: Path, requested_strategy: str):
 
     current = binary.read_bytes()
     current_status, current_strategy, _details = classify_binary(current)
-    if current_status == "patched" and not binary.with_suffix(".bak").exists():
+    if current_status == "patched" and not backup_path(binary).exists():
         print(f"Already patched -> {binary} ({current_strategy})")
         print("No clean .bak exists, so nothing was changed.")
         return
 
-    backup = binary.with_suffix(".bak")
+    backup = backup_path(binary)
     source, source_path = read_source_bytes(binary)
     if source_path is None:
         shutil.copy2(binary, backup)
         source = backup.read_bytes()
         print(f"Backup  -> {backup}")
     else:
-        print("Backup exists, re-patching from clean copy")
+        current_is_different = current != source
+        current_is_clean = current_status == "clean"
+        if current_is_different and current_is_clean:
+            shutil.copy2(binary, backup)
+            source = current
+            print(f"Backup refreshed (binary updated) -> {backup}")
+        else:
+            print("Backup exists, re-patching from clean copy")
 
     strategy = choose_patch_strategy(source, requested_strategy)
     data = bytearray(source)
