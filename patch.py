@@ -223,7 +223,7 @@ def locate_noauth_sites(data: bytes) -> list[int]:
             continue
         if data[site + 1] == 0x31:
             continue
-        if data[site] in (0x20, 0x21):
+        if data[site] in (0x20, 0x21, 0x2B):
             sites.append(site)
     return sites
 
@@ -312,7 +312,7 @@ def classify_legacy_patch(data: bytes) -> tuple[str, list[str]]:
             0x20,
             2,
         ),
-        ("noAuth bypass", locate_noauth_sites(data), 0x21, 0x20, 2),
+        ("noAuth bypass", locate_noauth_sites(data), 0x21, 0x2B, 2),
     ]
 
     clean = 0
@@ -353,7 +353,7 @@ def classify_legacy_patch(data: bytes) -> tuple[str, list[str]]:
 def classify_decision_support_patches(data: bytes) -> tuple[str, list[str]]:
     checks = [
         ("feature flag", locate_feature_flag_sites(data), 0x31, 0x30, 2, True),
-        ("noAuth UI state", locate_noauth_sites(data), 0x21, 0x20, 2, True),
+        ("noAuth UI state", locate_noauth_sites(data), 0x21, 0x2B, 2, True),
         ("policyBlocked UI state", locate_policyblocked_ui_sites(data), 0x66, 0x30, 2, False),
     ]
 
@@ -422,7 +422,7 @@ def apply_decision_support_patches(data: bytearray) -> int:
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        edits += patch_byte(data, site, 0x21, 0x20, desc)
+        edits += patch_byte(data, site, 0x21, 0x2B, desc)
 
     desc = "channels notice policyBlocked UI"
     offsets = locate_policyblocked_ui_sites(data)
@@ -494,7 +494,7 @@ def apply_legacy_patches(data: bytearray) -> int:
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
-        edits += patch_byte(data, site, 0x21, 0x20, desc)
+        edits += patch_byte(data, site, 0x21, 0x2B, desc)
 
     return edits
 
