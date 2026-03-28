@@ -197,6 +197,17 @@ def locate_feature_flag_sites(data: bytes) -> list[int]:
     return sites
 
 
+def locate_permissions_flag_sites(data: bytes) -> list[int]:
+    """Locate tengu_harbor_permissions feature flag bytes."""
+    prefix = b'tengu_harbor_permissions",!'
+    sites = []
+    for off in find_all(data, prefix):
+        site = off + len(prefix)
+        if site < len(data) and data[site] in (0x30, 0x31):
+            sites.append(site)
+    return sites
+
+
 def locate_backwards_sites(
     data: bytes,
     anchor: bytes,
@@ -313,6 +324,7 @@ def classify_legacy_patch(data: bytes) -> tuple[str, list[str]]:
             2,
         ),
         ("noAuth bypass", locate_noauth_sites(data), 0x21, 0x2B, 2),
+        ("permissions flag", locate_permissions_flag_sites(data), 0x31, 0x30, 2),
     ]
 
     clean = 0
@@ -353,6 +365,7 @@ def classify_legacy_patch(data: bytes) -> tuple[str, list[str]]:
 def classify_decision_support_patches(data: bytes) -> tuple[str, list[str]]:
     checks = [
         ("feature flag", locate_feature_flag_sites(data), 0x31, 0x30, 2, True),
+        ("permissions flag", locate_permissions_flag_sites(data), 0x31, 0x30, 2, True),
         ("noAuth UI state", locate_noauth_sites(data), 0x21, 0x2B, 2, True),
         ("policyBlocked UI state", locate_policyblocked_ui_sites(data), 0x66, 0x30, 2, False),
     ]
@@ -412,6 +425,13 @@ def apply_decision_support_patches(data: bytearray) -> int:
 
     desc = "tengu_harbor default"
     offsets = locate_feature_flag_sites(data)
+    if len(offsets) < 2:
+        sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
+    for site in offsets:
+        edits += patch_byte(data, site, 0x31, 0x30, desc)
+
+    desc = "tengu_harbor_permissions default"
+    offsets = locate_permissions_flag_sites(data)
     if len(offsets) < 2:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
@@ -495,6 +515,13 @@ def apply_legacy_patches(data: bytearray) -> int:
         sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
     for site in offsets:
         edits += patch_byte(data, site, 0x21, 0x2B, desc)
+
+    desc = "tengu_harbor_permissions default"
+    offsets = locate_permissions_flag_sites(data)
+    if len(offsets) < 2:
+        sys.exit(f"FAIL [{desc}]: expected >=2 matches, found {len(offsets)}")
+    for site in offsets:
+        edits += patch_byte(data, site, 0x31, 0x30, desc)
 
     return edits
 
