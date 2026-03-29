@@ -18,8 +18,10 @@ Usage:
 
 import argparse
 import os
+import platform
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -862,6 +864,50 @@ def write_binary(binary: Path, data: bytes):
         )
 
 
+def maybe_resign_macos(binary: Path):
+    if platform.system() != "Darwin":
+        return
+
+    codesign = shutil.which("codesign")
+    manual = f"  codesign --remove-signature {binary}\n  codesign -s - {binary}"
+    if not codesign:
+        sys.exit(
+            "Patched binary written, but macOS re-signing is required and 'codesign' was not found.\n"
+            "Run:\n"
+            f"{manual}"
+        )
+
+    remove = subprocess.run(
+        [codesign, "--remove-signature", str(binary)],
+        capture_output=True,
+        text=True,
+    )
+    if remove.returncode != 0:
+        details = (remove.stderr or remove.stdout or "unknown error").strip()
+        sys.exit(
+            "Patched binary written, but failed to remove the existing macOS code signature.\n"
+            f"codesign output: {details}\n"
+            "Run manually:\n"
+            f"{manual}"
+        )
+
+    sign = subprocess.run(
+        [codesign, "-s", "-", str(binary)],
+        capture_output=True,
+        text=True,
+    )
+    if sign.returncode != 0:
+        details = (sign.stderr or sign.stdout or "unknown error").strip()
+        sys.exit(
+            "Patched binary written, but ad-hoc re-signing failed on macOS.\n"
+            f"codesign output: {details}\n"
+            "Run manually:\n"
+            f"{manual}"
+        )
+
+    print("  OK macOS ad-hoc codesign")
+
+
 def check(binary: Path, requested_strategy: str):
     if not binary.exists():
         sys.exit(f"Binary not found: {binary}")
@@ -928,6 +974,7 @@ def patch(binary: Path, requested_strategy: str):
         return
 
     write_binary(binary, patched_bytes)
+    maybe_resign_macos(binary)
     print(f"\nPatched -> {binary} ({edits} edit block(s), strategy={strategy})")
     print("Run:  claude --channels plugin:telegram@claude-plugins-official")
 

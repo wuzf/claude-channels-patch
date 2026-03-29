@@ -153,7 +153,7 @@ python3 patch.py --check --binary <ARCHIVED_BINARY>
 
 - 检测到的策略
 - 补丁前状态
-- 关键锚点数量，例如 `bun bytecode fallback`
+- 关键锚点数量，例如 `bun bytecode fallback`、`permissions flag`
 - 可选 UI 锚点是否存在
 
 ### 6. 对归档样本执行补丁
@@ -232,7 +232,14 @@ claude --channels plugin:telegram@claude-plugins-official
 
 - Bun `@bytecode` fallback 补丁
 - 部分补丁状态的 `mixed` 检测
+- `tengu_harbor_permissions` 功能开关补丁
+- `noAuth` UI 状态改为使用 `+`（`0x2B`）而不是空格占位
 - `2.1.80` 这类带点版本文件名的独立备份命名
+- macOS 上的 ad-hoc `codesign`（不依赖运行脚本的 Python 进程架构）
+
+当前限制：
+
+- 仓库维护者目前没有 Mac M 系列机器，Apple Silicon 路径尚未完成维护者本地真机回归测试
 
 ## 范围说明
 

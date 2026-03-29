@@ -11,7 +11,7 @@ Claude Code's `--channels` flag lets MCP servers push real-time messages into yo
 
 | Gate | What it checks | Why it blocks |
 |------|---------------|---------------|
-| **Feature flag** | `tengu_harbor` via GrowthBook | Defaults to `false`; unreachable when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` |
+| **Feature flags** | `tengu_harbor` and `tengu_harbor_permissions` via GrowthBook | Default to `false`; unreachable when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` |
 | **OAuth** | `accessToken` check | Requires claude.ai login; blocks API key / third-party proxy users |
 | **Allowlist** | Channel allowlist ledger | Server-side approved list is empty without GrowthBook |
 
@@ -24,8 +24,11 @@ By default, the script first tries a whole decision-function patch that preserve
 ## Compatibility
 
 - This script is intended for **Claude Code v2.1.80 and above**; tested on **2.1.81** and **2.1.83** on Windows, Linux, and macOS
+- On macOS, the script now performs an ad-hoc `codesign` after patching; this is especially important on Apple Silicon (`arm64`), where an invalid signature can cause the binary to be killed immediately
+- There is currently no local Mac M-series test machine available, so the Apple Silicon path has not been re-verified on maintainer-owned hardware
 - Uses **stable string anchors** (property names, return values, string literals) - no dependency on minified variable names
 - Auto-detects binaries from the official install methods (**Native Install**, **Homebrew**, **WinGet**) and patches them all
+- Supports standalone version-suffixed binary names such as `2.1.85`; the backup is written alongside it as `2.1.85.bak`
 - If your installation lives in a custom location, use `python patch.py --binary /path/to/claude`
 - The patch will refuse to apply if the expected code patterns are not found
 
@@ -51,6 +54,19 @@ python patch.py --strategy legacy
 python patch.py revert
 ```
 
+### macOS code-signing note
+
+Modifying a Mach-O binary on macOS invalidates the original code signature. The current `patch.py` now performs ad-hoc re-signing on Darwin regardless of the Python process architecture, which also covers running the script under Rosetta or an x86_64 Python on an Apple Silicon machine.
+
+Apple Silicon (`arm64`) is especially sensitive to invalid signatures, so this step matters most there. That said, there is currently no Mac M-series machine available in the maintainer's local environment, so this path still lacks maintainer-run real-device regression testing.
+
+If you are using an older script version, or need to re-sign manually, run:
+
+```bash
+codesign --remove-signature /path/to/claude
+codesign -s - /path/to/claude
+```
+
 After patching, start Claude Code with channels:
 
 ```bash
@@ -65,6 +81,8 @@ The Claude Code binary is a Node.js SEA (Single Executable Application) containi
 
 The script looks for the channel decision function, keeps the first `claude/channel` capability check intact, and rewrites the rest of the function body so it returns `register`. This is closer to the behavior of "keep the protocol check, remove the business gates".
 
+Regardless of strategy, the script also updates the Bun runtime fallback used by newer builds: it flips `// @bun @bytecode` to `// @bun @source__` so runtime execution uses the patched source copy. The `bun bytecode fallback` state is also included in `--check` classification as `clean`, `patched`, or `mixed`.
+
 You can inspect what the script would do without modifying anything:
 
 ```bash
@@ -73,7 +91,7 @@ python patch.py --check
 
 ### 2. Legacy fallback byte patch
 
-If the decision function cannot be located safely, the script falls back to 5 stable code-pattern edits across both bundled copies (10 edits total):
+If the decision function cannot be located safely, the script falls back to 6 stable code-pattern edits across both bundled copies (12 edits total):
 
 ### 2.1 Feature flag default: `!1` -> `!0`
 
@@ -87,7 +105,19 @@ function waH() { return l$("tengu_harbor", !0) }  // default = true
 
 The `l$` function reads feature flags from GrowthBook (Anthropic's remote config). When `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is set, GrowthBook is unreachable and `l$` returns the default value. Changing the default from `false` to `true` enables the feature.
 
-### 2.2 OAuth gate: `if(!` -> `if( `
+### 2.2 Permissions feature flag default: `!1` -> `!0`
+
+```javascript
+// Before
+return l$("tengu_harbor_permissions", !1)  // default = false
+
+// After
+return l$("tengu_harbor_permissions", !0)  // default = true
+```
+
+Newer Claude Code builds also consult `tengu_harbor_permissions`. The script flips it alongside `tengu_harbor` so the main channels gate and the permission-related path do not drift apart.
+
+### 2.3 OAuth gate: `if(!` -> `if( `
 
 ```javascript
 // Before - in B6f() channel registration
@@ -101,7 +131,7 @@ if ( SL()?.accessToken)   // condition inverted, never skips
 
 `SL()?.accessToken` reads the claude.ai OAuth token. API key users don't have one, so it returns `undefined`. Removing the `!` means the condition is `if(undefined)` which is falsy, the skip block never executes.
 
-### 2.3 Allowlist check (plugin): `&&!` -> `&& `
+### 2.4 Allowlist check (plugin): `&&!` -> `&& `
 
 ```javascript
 // Before
@@ -115,7 +145,7 @@ if (!D.dev &&  KaH().some(...))  // inverted: skips only if ON the allowlist
 
 Removing the `!` before the allowlist lookup inverts the check: it now skips only plugins that are on the allowlist, letting non-allowlisted plugins through.
 
-### 2.4 Allowlist check (server): `if(!` -> `if( `
+### 2.5 Allowlist check (server): `if(!` -> `if( `
 
 ```javascript
 // Before
@@ -127,14 +157,14 @@ else if ( D.dev) return { action: "skip", kind: "allowlist", ... };
 
 `D.dev` is `undefined` for production plugins, so `if( D.dev)` is always falsy, the skip never executes.
 
-### 2.5 noAuth state: `noAuth:!` -> `noAuth: `
+### 2.6 noAuth state: `noAuth:!` -> `noAuth:+`
 
 ```javascript
 // Before
 noAuth: !SL()?.accessToken   // true when no OAuth token
 
 // After
-noAuth:  SL()?.accessToken   // undefined (falsy) - treated as not-noAuth
+noAuth: +SL()?.accessToken   // +undefined -> NaN (falsy) - treated as not-noAuth
 ```
 
 ### Why two copies?
@@ -146,10 +176,11 @@ The binary embeds the JS bundle twice (main thread and worker). Every patch is a
 | # | Anchor | Byte change | Purpose |
 |---|--------|-------------|---------|
 | 1 | `tengu_harbor",!1)}` | `1` -> `0` | Feature flag default |
-| 2 | `?.accessToken)return{action:"skip",kind:"auth"` | `!` -> ` ` | OAuth bypass |
-| 3 | `.marketplace))return{action:"skip",kind:"allowlist"` | `!` -> ` ` | Plugin allowlist bypass |
-| 4 | `)return{action:"skip",kind:"allowlist",reason:\`server` | `!` -> ` ` | Server allowlist bypass |
-| 5 | `noAuth:!` | `!` -> ` ` | UI noAuth state |
+| 2 | `tengu_harbor_permissions",!1)}` | `1` -> `0` | Permissions feature flag default |
+| 3 | `?.accessToken)return{action:"skip",kind:"auth"` | `!` -> ` ` | OAuth bypass |
+| 4 | `.marketplace))return{action:"skip",kind:"allowlist"` | `!` -> ` ` | Plugin allowlist bypass |
+| 5 | `)return{action:"skip",kind:"allowlist",reason:\`server` | `!` -> ` ` | Server allowlist bypass |
+| 6 | `noAuth:!` | `!` -> `+` | UI noAuth state |
 
 ## Safety
 
@@ -157,6 +188,10 @@ The binary embeds the JS bundle twice (main thread and worker). Every patch is a
 - **Pattern matching**: Locates targets dynamically - no hardcoded offsets, no silent corruption
 - **Atomic write**: Uses temp file + `os.replace()` to avoid corrupting a running binary
 - **Revertible**: `python patch.py revert` restores all binaries at any time
+
+## Links
+
+- [linux.do](https://linux.do/)
 
 ## License
 
